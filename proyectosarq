@@ -1,0 +1,524 @@
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, getDoc, setDoc, collection, addDoc, onSnapshot, updateDoc, deleteDoc } from 'firebase/firestore';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+
+// Global variables provided by the Canvas environment
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+
+// --- HELPER COMPONENTS ---
+
+// Modal Component
+const Modal = ({ isOpen, onClose, children, title }) => {
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-60 z-50 flex justify-center items-center p-4" onClick={onClose}>
+            <div className="bg-white rounded-lg shadow-2xl w-full max-w-lg relative" onClick={e => e.stopPropagation()}>
+                <header className="flex justify-between items-center p-4 border-b border-gray-200">
+                    <h3 className="text-xl font-bold text-gray-800">{title}</h3>
+                    <button onClick={onClose} className="text-gray-400 hover:text-gray-600 transition-colors">
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </header>
+                <div className="p-6">
+                    {children}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// --- CORE COMPONENTS ---
+
+// Component for setting Architect Name
+const ArchitectNameInput = ({ userId, currentArchitectName, onNameSet }) => {
+    const [name, setName] = useState(currentArchitectName || '');
+    const [loading, setLoading] = useState(false);
+
+    const handleSaveName = async () => {
+        if (!name.trim()) return;
+        setLoading(true);
+        try {
+            const architectProfileRef = doc(db, `artifacts/${appId}/public/data/architectProfiles`, userId);
+            await setDoc(architectProfileRef, { name: name.trim(), userId }, { merge: true });
+            onNameSet(name.trim());
+        } catch (error) {
+            console.error("Error saving architect name:", error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="bg-gray-100 border border-gray-200 p-4 rounded-lg shadow-inner mb-6 text-center">
+            <h3 className="text-lg font-semibold text-gray-800 mb-3">Establecer tu Nombre de Arquitecto</h3>
+            <p className="text-sm text-gray-700 mb-4">Este nombre será visible para otros usuarios y en los reportes.</p>
+            <div className="flex flex-col sm:flex-row gap-3 justify-center items-center">
+                <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Tu nombre (ej: Arq. Laura Pérez)" className="flex-grow px-4 py-2 border border-gray-300 rounded-md focus:ring-orange-500 focus:border-orange-500 transition duration-150 w-full sm:w-auto"/>
+                <button onClick={handleSaveName} disabled={loading || !name.trim()} className="px-6 py-2 bg-orange-500 text-white font-semibold rounded-md shadow-md hover:bg-orange-600 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 transition duration-300 transform hover:scale-105 disabled:opacity-50 w-full sm:w-auto">
+                    {loading ? 'Guardando...' : 'Guardar Nombre'}
+                </button>
+            </div>
+        </div>
+    );
+};
+
+// Generic Transaction Form
+const TransactionForm = ({ transaction, onInputChange, onSubmit, buttonText, loading }) => (
+    <form onSubmit={onSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {['obra', 'rubro', 'proveedor', 'facturaRemito'].map(field => (
+            <div key={field}>
+                <label htmlFor={field} className="block text-sm font-medium text-gray-700 mb-1 capitalize">{field}</label>
+                <input type="text" id={field} name={field} value={transaction[field]} onChange={onInputChange} required={['obra', 'rubro', 'proveedor'].includes(field)} className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-orange-500 focus:border-orange-500"/>
+            </div>
+        ))}
+        <div>
+            <label htmlFor="fecha" className="block text-sm font-medium text-gray-700 mb-1">Fecha</label>
+            <input type="date" id="fecha" name="fecha" value={transaction.fecha} onChange={onInputChange} required className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-orange-500 focus:border-orange-500"/>
+        </div>
+        <div>
+            <label htmlFor="monto" className="block text-sm font-medium text-gray-700 mb-1">Monto</label>
+            <input type="number" id="monto" name="monto" value={transaction.monto} onChange={onInputChange} placeholder="0.00" step="0.01" min="0" required className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-orange-500 focus:border-orange-500"/>
+        </div>
+        <div>
+            <label htmlFor="tipoPago" className="block text-sm font-medium text-gray-700 mb-1">Tipo de Pago</label>
+            <select id="tipoPago" name="tipoPago" value={transaction.tipoPago} onChange={onInputChange} required className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-orange-500 focus:border-orange-500">
+                <option value="Efectivo">Efectivo</option>
+                <option value="Débito">Débito</option>
+                <option value="Transferencia">Transferencia</option>
+                <option value="Cuenta Corriente">Cuenta Corriente</option>
+            </select>
+        </div>
+        <div className="md:col-span-2">
+            <label htmlFor="descripcion" className="block text-sm font-medium text-gray-700 mb-1">Descripción</label>
+            <textarea id="descripcion" name="descripcion" value={transaction.descripcion} onChange={onInputChange} rows="3" className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-orange-500 focus:border-orange-500"></textarea>
+        </div>
+        <div className="md:col-span-2 flex justify-end gap-3 mt-4">
+            <button type="submit" disabled={loading} className="px-6 py-2 bg-orange-500 text-white font-bold rounded-md shadow-md hover:bg-orange-600 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 transition duration-300 disabled:opacity-50">
+                {loading ? 'Procesando...' : buttonText}
+            </button>
+        </div>
+    </form>
+);
+
+// Transaction Table Component
+const TransactionsTable = ({ transactions, onEdit, onDelete, showArchitectColumn = false }) => (
+    <div className="overflow-x-auto rounded-lg shadow-md border border-gray-200">
+        {transactions.length === 0 ? (
+            <p className="p-6 text-center text-gray-500">No se encontraron transacciones.</p>
+        ) : (
+            <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-100">
+                    <tr>
+                        {['Fecha', 'Obra', 'Rubro', 'Monto', 'Tipo Pago', 'Fact./Remito', 'Proveedor', 'Descripción'].map(header => (
+                            <th key={header} className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">{header}</th>
+                        ))}
+                        {showArchitectColumn && <th className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Arquitecto</th>}
+                        <th className="px-6 py-3 text-center text-xs font-bold text-gray-600 uppercase tracking-wider">Acciones</th>
+                    </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                    {transactions.map(t => (
+                        <tr key={t.id} className="hover:bg-gray-50 transition-colors">
+                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{t.fecha}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{t.obra}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{t.rubro}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">${t.monto?.toFixed(2) || '0.00'}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{t.tipoPago}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{t.facturaRemito || 'N/A'}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{t.proveedor}</td>
+                            <td className="px-6 py-4 text-sm text-gray-700 max-w-xs truncate" title={t.descripcion}>{t.descripcion || 'N/A'}</td>
+                            {showArchitectColumn && <td className="px-6 py-4 whitespace-nowrap text-xs text-orange-700 font-semibold">{t.architectName}</td>}
+                            <td className="px-6 py-4 whitespace-nowrap text-center text-sm font-medium">
+                                <button onClick={() => onEdit(t)} className="text-blue-600 hover:text-blue-900 transition-colors mr-3" title="Editar">
+                                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z"></path><path fillRule="evenodd" d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" clipRule="evenodd"></path></svg>
+                                </button>
+                                <button onClick={() => onDelete(t)} className="text-red-600 hover:text-red-900 transition-colors" title="Borrar">
+                                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 012 0v6a1 1 0 11-2 0V8z" clipRule="evenodd"></path></svg>
+                                </button>
+                            </td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        )}
+    </div>
+);
+
+
+// Dashboard Component
+const Dashboard = ({ transactions, userId, onEdit, onDelete, onTransactionAdded }) => {
+    const [newTransaction, setNewTransaction] = useState({ obra: '', rubro: '', fecha: new Date().toISOString().split('T')[0], monto: '', tipoPago: 'Efectivo', facturaRemito: '', proveedor: '', descripcion: '' });
+    
+    const currentArchitectTransactions = useMemo(() => {
+        return transactions.filter(t => t.architectId === userId).sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+    }, [transactions, userId]);
+
+    const handleInputChange = (e) => {
+        const { name, value } = e.target;
+        setNewTransaction(prev => ({ ...prev, [name]: value }));
+    };
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        onTransactionAdded(newTransaction, () => {
+             setNewTransaction({ obra: '', rubro: '', fecha: new Date().toISOString().split('T')[0], monto: '', tipoPago: 'Efectivo', facturaRemito: '', proveedor: '', descripcion: '' });
+        });
+    };
+
+    return (
+        <div className="space-y-8">
+            <div>
+                <h2 className="text-2xl font-bold text-gray-800 mb-4">Registrar Nueva Transacción</h2>
+                <div className="p-6 bg-gray-50 rounded-lg shadow-inner border">
+                    <TransactionForm 
+                        transaction={newTransaction}
+                        onInputChange={handleInputChange}
+                        onSubmit={handleSubmit}
+                        buttonText="Agregar Transacción"
+                    />
+                </div>
+            </div>
+            <div>
+                <h2 className="text-2xl font-bold text-gray-800 mb-4">Mis Transacciones ({currentArchitectTransactions.length})</h2>
+                <TransactionsTable transactions={currentArchitectTransactions} onEdit={onEdit} onDelete={onDelete} />
+            </div>
+        </div>
+    );
+};
+
+
+// Consolidated View Component
+const ConsolidatedView = ({ transactions, architectProfiles, onEdit, onDelete }) => {
+    const [filters, setFilters] = useState({ obra: '', rubro: '', proveedor: '', architectName: '' });
+
+    // Load xlsx library
+    useEffect(() => {
+        const script = document.createElement('script');
+        script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+        script.async = true;
+        document.body.appendChild(script);
+        return () => document.body.removeChild(script);
+    }, []);
+
+    const uniqueArchitectNames = useMemo(() => [...new Set(Object.values(architectProfiles).map(p => p.name))].sort(), [architectProfiles]);
+
+    const handleFilterChange = (e) => {
+        const { name, value } = e.target;
+        setFilters(prev => ({ ...prev, [name]: value }));
+    };
+
+    const filteredTransactions = useMemo(() => {
+        return transactions.filter(t => 
+            (filters.obra === '' || t.obra.toLowerCase().includes(filters.obra.toLowerCase())) &&
+            (filters.rubro === '' || t.rubro.toLowerCase().includes(filters.rubro.toLowerCase())) &&
+            (filters.proveedor === '' || t.proveedor.toLowerCase().includes(filters.proveedor.toLowerCase())) &&
+            (filters.architectName === '' || t.architectName === filters.architectName)
+        ).sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+    }, [transactions, filters]);
+
+    const chartData = useMemo(() => {
+        const aggregated = filteredTransactions.reduce((acc, t) => {
+            const date = t.fecha;
+            acc[date] = (acc[date] || 0) + t.monto;
+            return acc;
+        }, {});
+        return Object.keys(aggregated).sort().map(date => ({ fecha: date, egreso: aggregated[date] }));
+    }, [filteredTransactions]);
+    
+    const exportToExcel = () => {
+        if (typeof XLSX === 'undefined') {
+            alert("La librería de exportación no está lista, por favor intente de nuevo en unos segundos.");
+            return;
+        }
+
+        // 1. Hoja de Resumen
+        const totalGastado = filteredTransactions.reduce((sum, t) => sum + t.monto, 0);
+        const resumenPorRubro = filteredTransactions.reduce((acc, t) => {
+            acc[t.rubro] = (acc[t.rubro] || 0) + t.monto;
+            return acc;
+        }, {});
+        const resumenPorProveedor = filteredTransactions.reduce((acc, t) => {
+            acc[t.proveedor] = (acc[t.proveedor] || 0) + t.monto;
+            return acc;
+        }, {});
+
+        const summaryData = [
+            ["Resumen de Transacciones Filtradas"],
+            [],
+            ["Total General Gastado:", totalGastado],
+            [],
+            ["Resumen por Rubro"],
+            ...Object.entries(resumenPorRubro).map(([rubro, total]) => [rubro, total]),
+            [],
+            ["Resumen por Proveedor"],
+            ...Object.entries(resumenPorProveedor).map(([proveedor, total]) => [proveedor, total]),
+        ];
+        const ws_summary = XLSX.utils.aoa_to_sheet(summaryData);
+        ws_summary['C3'] = { t: 'n', v: totalGastado, z: '$#,##0.00' };
+        Object.keys(resumenPorRubro).forEach((_, i) => ws_summary[`B${6+i}`] = { t: 'n', v: Object.values(resumenPorRubro)[i], z: '$#,##0.00' });
+        Object.keys(resumenPorProveedor).forEach((_, i) => ws_summary[`B${8 + Object.keys(resumenPorRubro).length + i}`] = { t: 'n', v: Object.values(resumenPorProveedor)[i], z: '$#,##0.00' });
+
+
+        // 2. Hoja de Datos Detallados
+        const detailedData = filteredTransactions.map(t => ({
+            Fecha: t.fecha,
+            Obra: t.obra,
+            Rubro: t.rubro,
+            Monto: t.monto,
+            'Tipo de Pago': t.tipoPago,
+            'Factura/Remito': t.facturaRemito,
+            Proveedor: t.proveedor,
+            Arquitecto: t.architectName,
+            Descripción: t.descripcion
+        }));
+        const ws_details = XLSX.utils.json_to_sheet(detailedData);
+
+        // Crear Libro y Descargar
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws_summary, "Resumen");
+        XLSX.utils.book_append_sheet(wb, ws_details, "Detalle Transacciones");
+        XLSX.writeFile(wb, "Resumen_de_Caja.xlsx");
+    };
+
+    return (
+        <div className="space-y-8">
+            <h2 className="text-2xl font-bold text-gray-800">Vista Consolidada</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 p-6 bg-gray-50 rounded-lg shadow-inner border">
+                {['obra', 'rubro', 'proveedor'].map(f => (
+                    <input key={f} type="text" name={f} value={filters[f]} onChange={handleFilterChange} placeholder={`Filtrar por ${f}...`} className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-orange-500 focus:border-orange-500"/>
+                ))}
+                 <select name="architectName" value={filters.architectName} onChange={handleFilterChange} className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-orange-500 focus:border-orange-500">
+                    <option value="">Todos los Arquitectos</option>
+                    {uniqueArchitectNames.map(name => <option key={name} value={name}>{name}</option>)}
+                </select>
+                <button onClick={exportToExcel} className="w-full lg:w-auto px-4 py-2 bg-green-600 text-white font-semibold rounded-md shadow hover:bg-green-700 transition flex items-center justify-center gap-2">
+                   <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-11a1 1 0 10-2 0v2H7a1 1 0 100 2h2v2a1 1 0 102 0v-2h2a1 1 0 100-2h-2V7z"></path></svg>
+                    Exportar
+                </button>
+            </div>
+            
+            <TransactionsTable transactions={filteredTransactions} onEdit={onEdit} onDelete={onDelete} showArchitectColumn={true} />
+
+            <h3 className="text-xl font-bold text-gray-800">Egreso de Dinero por Fecha</h3>
+            {chartData.length > 0 ? (
+                <div className="bg-white p-4 rounded-lg shadow-md border" style={{ height: 400 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 50 }}>
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis dataKey="fecha" angle={-45} textAnchor="end" />
+                            <YAxis tickFormatter={(value) => `$${value}`} />
+                            <Tooltip formatter={(value) => `$${value.toFixed(2)}`} />
+                            <Legend />
+                            <Line type="monotone" dataKey="egreso" stroke="#f97316" strokeWidth={2} activeDot={{ r: 8 }} />
+                        </LineChart>
+                    </ResponsiveContainer>
+                </div>
+            ) : <p className="p-6 text-center text-gray-500 bg-gray-50 rounded-lg">No hay datos para mostrar en el gráfico.</p>}
+        </div>
+    );
+};
+
+
+// Main App Component
+const App = () => {
+    const [transactions, setTransactions] = useState([]);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+    const [architectName, setArchitectName] = useState(null);
+    const [showNameInput, setShowNameInput] = useState(false);
+    const [currentPage, setCurrentPage] = useState('dashboard');
+    const [architectProfiles, setArchitectProfiles] = useState({});
+    
+    // Modal states
+    const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+    const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+    const [transactionToEdit, setTransactionToEdit] = useState(null);
+    const [transactionToDelete, setTransactionToDelete] = useState(null);
+    const [loading, setLoading] = useState(false);
+
+    // --- Auth and Data Fetching Effects ---
+    useEffect(() => {
+        const setupAuth = async () => {
+            try {
+                if (initialAuthToken) await signInWithCustomToken(auth, initialAuthToken);
+                else await signInAnonymously(auth);
+            } catch (error) { console.error("Error en autenticación:", error); }
+        };
+        const unsubAuth = onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                setUserId(user.uid);
+                const profileRef = doc(db, `artifacts/${appId}/public/data/architectProfiles`, user.uid);
+                const docSnap = await getDoc(profileRef);
+                if (docSnap.exists() && docSnap.data().name) {
+                    setArchitectName(docSnap.data().name);
+                    setShowNameInput(false);
+                } else {
+                    setShowNameInput(true);
+                }
+            } else {
+                setUserId(null);
+                setArchitectName(null);
+                setShowNameInput(false);
+            }
+            setIsAuthReady(true);
+        });
+        setupAuth();
+        return () => unsubAuth();
+    }, []);
+
+    useEffect(() => {
+        if (!isAuthReady) return;
+        const profilesRef = collection(db, `artifacts/${appId}/public/data/architectProfiles`);
+        const unsubProfiles = onSnapshot(profilesRef, (snapshot) => {
+            const profiles = {};
+            snapshot.docs.forEach(doc => { profiles[doc.id] = doc.data(); });
+            setArchitectProfiles(profiles);
+        });
+        return () => unsubProfiles();
+    }, [isAuthReady]);
+
+    useEffect(() => {
+        if (!isAuthReady || Object.keys(architectProfiles).length === 0) return;
+        const transRef = collection(db, `artifacts/${appId}/public/data/transactions`);
+        const unsubTrans = onSnapshot(transRef, (snapshot) => {
+            const fetched = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data(),
+                architectName: architectProfiles[doc.data().architectId]?.name || `ID: ${doc.data().architectId}`,
+            }));
+            setTransactions(fetched);
+        });
+        return () => unsubTrans();
+    }, [isAuthReady, architectProfiles]);
+
+    // --- CRUD Handlers ---
+    const handleAddTransaction = useCallback(async (newTransaction, callback) => {
+        if (!userId || !architectName) return;
+        setLoading(true);
+        try {
+            const transRef = collection(db, `artifacts/${appId}/public/data/transactions`);
+            await addDoc(transRef, {
+                ...newTransaction,
+                monto: parseFloat(newTransaction.monto),
+                fecha: new Date(newTransaction.fecha).toISOString().split('T')[0],
+                architectId: userId,
+                architectName: architectName,
+                createdAt: new Date().toISOString(),
+            });
+            callback(); // Resets the form
+        } catch (error) { console.error("Error al agregar transacción:", error); } 
+        finally { setLoading(false); }
+    }, [userId, architectName]);
+
+    const handleEditClick = (transaction) => {
+        setTransactionToEdit(transaction);
+        setIsEditModalOpen(true);
+    };
+
+    const handleUpdateTransaction = useCallback(async (updatedTransaction) => {
+        if (!transactionToEdit) return;
+        setLoading(true);
+        try {
+            const transRef = doc(db, `artifacts/${appId}/public/data/transactions`, transactionToEdit.id);
+            await updateDoc(transRef, {
+                ...updatedTransaction,
+                 monto: parseFloat(updatedTransaction.monto),
+            });
+            setIsEditModalOpen(false);
+            setTransactionToEdit(null);
+        } catch (error) { console.error("Error al actualizar:", error); } 
+        finally { setLoading(false); }
+    }, [transactionToEdit]);
+
+    const handleDeleteClick = (transaction) => {
+        setTransactionToDelete(transaction);
+        setIsDeleteModalOpen(true);
+    };
+
+    const confirmDelete = useCallback(async () => {
+        if (!transactionToDelete) return;
+        setLoading(true);
+        try {
+            const transRef = doc(db, `artifacts/${appId}/public/data/transactions`, transactionToDelete.id);
+            await deleteDoc(transRef);
+            setIsDeleteModalOpen(false);
+            setTransactionToDelete(null);
+        } catch (error) { console.error("Error al borrar:", error); } 
+        finally { setLoading(false); }
+    }, [transactionToDelete]);
+
+    const handleNameSet = (name) => {
+        setArchitectName(name);
+        setShowNameInput(false);
+    };
+    
+    // --- Render ---
+    if (!isAuthReady) {
+        return <div className="min-h-screen bg-gray-100 flex justify-center items-center"><div className="text-xl font-semibold text-gray-700">Cargando Sistema...</div></div>;
+    }
+
+    return (
+        <div className="min-h-screen bg-gray-100 p-4 font-sans antialiased">
+            <div className="max-w-screen-xl mx-auto bg-white shadow-xl rounded-xl">
+                <header className="flex flex-col md:flex-row items-center justify-between p-6 border-b-4 border-orange-500">
+                    <img src="https://i.imgur.com/gTf7eJz.png" alt="SCS Logo" className="h-16 mb-4 md:mb-0"/>
+                    <div className="text-center md:text-right">
+                        {architectName && <p className="font-semibold text-gray-800">¡Hola, {architectName}!</p>}
+                        <p className="text-xs text-gray-500 mt-1">ID de Sesión: <span className="font-mono">{userId}</span></p>
+                    </div>
+                </header>
+
+                <main className="p-6 md:p-8">
+                    {showNameInput && userId && <ArchitectNameInput userId={userId} currentArchitectName={architectName} onNameSet={handleNameSet} />}
+                    
+                    <nav className="flex justify-center border-b border-gray-200 mb-8">
+                        <button onClick={() => setCurrentPage('dashboard')} className={`px-6 py-3 font-semibold transition-colors duration-200 ${currentPage === 'dashboard' ? 'border-b-2 border-orange-500 text-orange-600' : 'text-gray-500 hover:text-orange-500'}`}>Mi Caja</button>
+                        <button onClick={() => setCurrentPage('consolidated')} className={`px-6 py-3 font-semibold transition-colors duration-200 ${currentPage === 'consolidated' ? 'border-b-2 border-orange-500 text-orange-600' : 'text-gray-500 hover:text-orange-500'}`}>Vista Consolidada</button>
+                    </nav>
+
+                    {currentPage === 'dashboard' ? (
+                        <Dashboard transactions={transactions} userId={userId} onEdit={handleEditClick} onDelete={handleDeleteClick} onTransactionAdded={handleAddTransaction}/>
+                    ) : (
+                        <ConsolidatedView transactions={transactions} architectProfiles={architectProfiles} onEdit={handleEditClick} onDelete={handleDeleteClick}/>
+                    )}
+                </main>
+            </div>
+
+            {/* Edit Modal */}
+            <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title="Editar Transacción">
+                {transactionToEdit && (
+                    <TransactionForm 
+                        transaction={transactionToEdit}
+                        onInputChange={(e) => setTransactionToEdit(prev => ({...prev, [e.target.name]: e.target.value}))}
+                        onSubmit={(e) => { e.preventDefault(); handleUpdateTransaction(transactionToEdit); }}
+                        buttonText="Guardar Cambios"
+                        loading={loading}
+                    />
+                )}
+            </Modal>
+
+            {/* Delete Confirmation Modal */}
+            <Modal isOpen={isDeleteModalOpen} onClose={() => setIsDeleteModalOpen(false)} title="Confirmar Eliminación">
+                <p className="text-gray-700 mb-6">¿Estás seguro de que deseas eliminar esta transacción? Esta acción no se puede deshacer.</p>
+                <div className="flex justify-end gap-4">
+                    <button onClick={() => setIsDeleteModalOpen(false)} className="px-6 py-2 bg-gray-200 text-gray-800 font-semibold rounded-md hover:bg-gray-300">Cancelar</button>
+                    <button onClick={confirmDelete} disabled={loading} className="px-6 py-2 bg-red-600 text-white font-semibold rounded-md hover:bg-red-700 disabled:opacity-50">
+                        {loading ? 'Eliminando...' : 'Eliminar'}
+                    </button>
+                </div>
+            </Modal>
+        </div>
+    );
+};
+
+export default App;
